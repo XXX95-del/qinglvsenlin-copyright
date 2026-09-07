@@ -276,8 +276,6 @@ import { DeviceQuotaGuard, sha256Hex, consentDigest, signatureDigest } from '@qi
 
 ## 关于
 
-本项目的技术方案同样已在创客IP平台进行技术公示，公开的算法骨架确保版权校验与电子签的逻辑透明、可审查、无后门。
-
 qinglvsenlin-copyright 是「青律森林」版权保护体系的**开源骨架**——聚焦**版权校验（设备激活上限）**与**电子签（哈希存证）**两块通用机制。它去除了宿主系统的全部业务耦合与敏感信息：不绑定数据库、不携带真实数据、不含商户/客户资料，可自由嵌入任何应用，也可独立演进。
 
 与同样开源的 [`qinglvsenlin-desens`（脱敏系统）](https://github.com/XXX95-del/qinglvsenlin-desens) 互为配套——脱敏负责"敏感信息不落地"，版权合规负责"授权与存证可信"。二者独立发布、可组合使用，共同构成一套从数据安全到权属证明的完整合规底座。
