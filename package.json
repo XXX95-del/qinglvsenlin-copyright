@@ -13,10 +13,10 @@
     "row-lock",
     "anti-tamper"
   ],
-  "homepage": "https://github.com/YOUR_USERNAME/qinglvsenlin-copyright",
+  "homepage": "https://github.com/XXX95-del/qinglvsenlin-copyright",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/qinglvsenlin-copyright"
+    "url": "https://github.com/XXX95-del/qinglvsenlin-copyright"
   },
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.15.9",
