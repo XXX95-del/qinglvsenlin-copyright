@@ -1,471 +1,101 @@
 # 版权合规方案 · 开源骨架
 
-> 面向「软件版权合规」的组合安全骨架：**客户端零信任数据脱敏 + 设备激活上限校验 + 电子签哈希存证**
-> 纯迭代可运行，无第三方后端必需依赖；生产接入时可按需替换为任意数据库/接入层
+面向「离线文档/软件版权保护」的通用实现骨架，聚焦两大核心机制：
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+- **版权校验（设备激活上限）**：控制同一份内容允许绑定的活跃设备数，从数据库/存储层杜绝并发绕过。
+- **电子签（哈希存证）**：协议正文与签署信息以**原文存储**，同时生成 SHA-256 哈希绑定，实现防篡改与可核验。
 
----
+纯 TypeScript 实现，**零第三方运行时依赖**，可嵌入任意后端（Node / Postgres / RDB / KV）。
 
-## 概述
-
-本骨架库沉淀了三段可独立复用、也可组合使用的安全能力：
-
-- 敏感数据在**浏览器端**被识别并替换为纯随机占位符
-- 映射表使用 **AES-256-GCM** 加密后存储，密钥通过 **PBKDF2** 派生
-- 服务器端仅存储加密密文和脱敏后的占位符，**无法还原原始数据**
-- 全局 `fetch` 拦截器自动完成请求脱敏与响应还原，**用户无感**
-- 支持**跨案件隔离**，同一原文在不同案件中映射到不同占位符
-
----
+> 本项目仅开源**通用机制骨架**，不含任何业务字段、密钥、个人身份信息或具体协议条款。
 
 ## 架构
 
 ```
-┌──────────────────────────────────────────────┐
-│                  客户端（浏览器）               │
-│                                                │
-│  AuthInterceptor（全局 fetch 拦截器）          │
-│  POST/PUT/PATCH → 自动脱敏                    │
-│  GET → 自动还原                               │
-│                                                │
-│  ┌─────────────┐  ┌──────────┐  ┌──────────┐  │
-│  │ 脱敏引擎     │  │ 加密模块 │  │ 元数据   │  │
-│  │ 敏感信息识别 │  │ AES-256- │  │ 实体角色 │  │
-│  │ 纯随机占位符 │  │ GCM      │  │ 关系抽取 │  │
-│  │ 跨案件隔离   │  │ PBKDF2   │  │ 语义标签 │  │
-│  └─────────────┘  └──────────┘  └──────────┘  │
-│                                                │
-│  密钥管理：会话密钥（内存）│ 设备密钥（IndexedDB）│
-│              登出即销毁    │  non-extractable   │
-└──────────────────────┬───────────────────────┘
-                       │ HTTPS（仅传输加密数据）
-                       ▼
-┌──────────────────────────────────────────────┐
-│                  服务器端                     │
-│          存储 AES-256-GCM 加密密文            │
-│           存储纯随机占位符                     │
-│           存储结构化元数据（供 AI 使用）       │
-│              不存在解密密钥                    │
-│            无法还原原始数据                     │
-└──────────────────────────────────────────────┘
+┌────────────────────────────────────────────┐
+│                业务层（宿主系统）            │
+│   你主导的：文件元数据 / 用户 / 订单 / 权限  │
+└────────────────────────────────────────────┘
+        │ 接入以下两个纯逻辑模块
+        ▼
+┌────────────────────────┐   ┌──────────────────────────┐
+│ copyright/device       │   │ esign（电子签哈希存证）     │
+│ 设备激活上限 · 原子并发  │   │ 正文+签名图 → SHA-256 存根  │
+└────────────────────────┘   └──────────────────────────┘
+        ▲                              ▲
+        │       可替换的持久化适配层        │
+        ▼                              ▼
+  你的 RDB / Redis / KV / 云DB       你的存储 + 简单账本
 ```
 
----
+两个模块只依赖调用方注入的**读写回调**，不绑定特定数据库，保证可移植、可测试。
 
 ## 核心模块
 
-### 脱敏引擎 (`desensitize-engine.ts`)
+### `devices.ts` — 设备激活上限（原子并发控制）
 
-核心引擎，管理敏感信息的识别、占位符生成、映射维护和脱敏/还原操作。
+防止同一份离线内容被破解为「无限设备可激活」，核心是解决并发下计数错乱的经典竞态。
 
-**关键特性：**
-- 插件式识别器接口，支持自定义敏感信息检测规则
-- 纯随机占位符生成（`crypto.getRandomValues()`，8 位十六进制）
-- 跨案件隔离：`MappingKey = caseId + '::' + originalText`
-- 案件内一致性：同一案件内同一原文映射到同一占位符
-- 导入/导出映射表（用于云端同步）
+```ts
+const guard = new DeviceQuotaGuard(3); // 最多 3 台活跃设备
 
-```typescript
-import { DesensitizeEngine } from './desensitize-engine';
+// 激活回调：drain(锁住file) / readActive(读当前活跃数) / insert(写入激活)
+const r = await guard.activate(
+  async () => { await lockFile('doc-1'); },      // 串行化同一文件的并发激活
+  async () => countActive('doc-1'),               // 锁内重查
+  async (dev) => insertActivation('doc-1', dev),  // 未满才写入
+);
 
-const engine = new DesensitizeEngine();
-
-// 自定义识别器
-engine.registerDetector({
-  name: 'phone',
-  detect(text: string) {
-    const regex = /1[3-9]\d{9}/g;
-    const matches: DetectorMatch[] = [];
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      matches.push({
-        original: match[0],
-        start: match.index,
-        end: match.index + match[0].length,
-        type: 'MOB',
-        metadata: { entityType: 'phone' },
-      });
-    }
-    return matches;
-  },
-});
-
-// 脱敏
-const result = await engine.desensitize('请联系张三，电话13800138000', 'case-001');
-console.log(result.text); // "请联系 a8f3d9e2，电话 b7c2e1f4"
-
-// 还原
-const restored = await engine.restore(result.text, 'case-001');
-console.log(restored); // "请联系张三，电话13800138000"
+if (r.code === 'ACTIVATED')     { /* 新设备激活成功 */ }
+if (r.code === 'DEVICE_ALREADY'){ /* 同设备幂等复用 token */ }
+if (r.code === 'DEVICE_LIMIT')  { /* 已达上限，拒绝 */ }
 ```
 
-### 随机占位符 (`random-placeholder.ts`)
+设计要点：
 
-使用 `crypto.getRandomValues()` 生成 8 位十六进制随机占位符。
+- **锁外乐观放行的误区**：若只在锁外先查计数再插入，并发请求会同时读到旧值→ 一起通过 → 突破上限。
+- **正确范式**：为同一授权对象加**排他锁**（数据库行锁 / `SELECT ... FOR UPDATE` / Redis 分布式锁 / advisory lock），在锁内**重新读取**当前活跃数，未满才插入，并依赖「文件↔设备」唯一索引兜底。
+- **幂等**：同一设备重复激活，复用已签发 token，不新增记录。
+- 通过回调注入持久化，天然适配多种存储。
 
-```typescript
-import { generatePlaceholder } from './random-placeholder';
+### `esign.ts` — 电子签哈希存证（原文存储 + 防篡改）
 
-const placeholder = generatePlaceholder(); // 例如 "a8f3d9e2"
+协议签署的「不可抵赖」不靠封存明文，而靠**哈希绑定**：
+
+- **原文存储**：协议正文、签署者姓名、签名图像等均以原文落库，作为完整可读证据（司法作证需要）。
+- **哈希存根**：对「同意凭据 + 签署时间 + 协议正文哈希」做 SHA-256，生成不可逆签名哈希。内容被篡改 → 哈希对不上 → 可证伪。
+
+```ts
+// 正文防篡改：内容哈希
+const contentHash = await sha256Hex(agreementText); // 绑定到协议版本
+
+// 同意凭据：勾选同意 = 正文哈希的绑定承诺
+const consentSig = await consentDigest(agreementVersion, contentHash, signedAt);
+
+// 手写签名图同样纳入哈希（若有）
+const sigHash = await signatureDigest(consentSig, signatureImageBase64 || '');
+
+// 随机防重 token（激活/签署记录唯一标识）
+const token = randomToken('ACT', 4);
 ```
 
-### 加密模块 (`mapping-crypto.ts`)
+设计要点：
 
-AES-256-GCM 认证加密 + PBKDF2 密钥派生。
-
-```typescript
-import { deriveKeyFromPassword, encrypt, decrypt, setSessionKey, clearSessionKey, restoreSessionKey, isSessionKeyReady } from './mapping-crypto';
-
-// 从密码派生密钥
-const salt = crypto.getRandomValues(new Uint8Array(16));
-const key = await deriveKeyFromPassword('user-password', salt);
-
-// 加密
-const encrypted = await encrypt('敏感数据', key);
-
-// 解密
-const decrypted = await decrypt(encrypted, key);
-
-// 会话密钥管理
-setSessionKey(key);
-// ... 使用会话密钥 ...
-
-// 页面刷新后从 sessionStorage 恢复密钥
-await restoreSessionKey();
-isSessionKeyReady(); // true
-
-clearSessionKey(); // 登出时销毁
-```
-
-### 元数据系统 (`mapping-metadata.ts`)
-
-为脱敏后的数据提供结构化语义信息，供 AI 在不接触原文的情况下完成推理分析。
-
-```typescript
-import { buildMetadata, LEGAL_ROLES, RELATION_TYPES } from './mapping-metadata';
-
-const metadata = buildMetadata('张三', 'PER', '原告张三诉被告李四合同纠纷');
-console.log(metadata.role); // "plaintiff"
-```
-
-### 云端同步 (`mapping-sync.ts`)
-
-加密映射表的上传与拉取，支持多设备登录。
-
-```typescript
-import { onLogin, onMappingChange, onLogout, restoreFromSession } from './mapping-sync';
-
-// 登录时：派生密钥 + 拉取云端映射 + 解密入缓存
-await onLogin('user-password');
-
-// 页面刷新后：从 sessionStorage 恢复密钥 + 拉取云端映射
-await restoreFromSession();
-
-// 映射变更时：加密 + 上传云端
-await onMappingChange({ caseId: 'case-001', mappings: [...] });
-
-// 登出时：清除密钥和缓存
-onLogout();
-```
-
-### 全局拦截器 (`auth-interceptor.ts`)
-
-自动拦截全局 `fetch` 请求，对请求体脱敏、响应体还原。**自动从 URL 提取 caseId**，确保跨案件隔离在拦截器层面生效。
-
-```typescript
-import { AuthInterceptor } from './auth-interceptor';
-
-const interceptor = new AuthInterceptor({
-  engine: desensitizeEngine,
-  excludePaths: ['/api/auth/', '/api/workshop/'],
-  skipFields: ['status', 'type', 'id', 'user_id'],
-});
-
-interceptor.install(); // 开始拦截
-// 所有 fetch 请求自动脱敏/还原
-// /api/cases/case-001/documents → engine.setCaseId('case-001')
-// /api/cases/case-002/evidences  → engine.setCaseId('case-002')
-interceptor.uninstall(); // 停止拦截
-```
-
----
-
-## 安全设计
-
-### 两级密钥体系
-
-| 密钥类型 | 生成方式 | 存储位置 | 用途 |
-|---------|---------|---------|------|
-| 设备密钥 | `crypto.subtle.generateKey()` | IndexedDB（non-extractable） | 本地数据加密 |
-| 会话密钥 | PBKDF2(password, salt, 100000 次迭代) | 会话内存 + sessionStorage 持久化 | 云端同步解密 |
-
-### 安全防护措施
-
-- **AES-256-GCM 认证加密**：提供机密性和完整性保护，防篡改
-- **PBKDF2 100,000 次迭代**：增加暴力破解成本
-- **随机盐值**：每次登录使用不同盐值，防预计算攻击
-- **跨案件隔离**：同一原文在不同案件映射到不同占位符，防跨案件关联
-- **密钥不可导出**：设备密钥设置为 `non-extractable`，无法通过 JS API 导出
-- **登出即销毁**：会话密钥仅存于内存和 sessionStorage，登出后立即清除
-
-### 自动清理机制
-
-- 结案 90 天 → 归档
-- 归档 180 天 → 清理
-- 云端备份保留，用户访问时自动恢复
-
----
+- **正文原文存储 + 内容哈希**双轨：数据库存 `agreement_versions`（原文模板）与 `signing_records`（原文签名图 + 哈希），哈希不牺牲可读证据。
+- **哈希链**：同意 → 正文 → 签名图逐层绑定，任一环节被改都可检测。
+- 与设备上限解耦：即使设备数达标，签署存证逻辑独立可复用。
 
 ## 快速开始
 
-```bash
-# 安装依赖
-pnpm install
-
-# 类型检查
-pnpm typecheck
-```
-
-### 基本使用
-
-```typescript
-import { DesensitizeEngine, generatePlaceholder, buildMetadata } from './src/index';
-
-const engine = new DesensitizeEngine();
-
-// 1. 注册自定义识别器
-engine.registerDetector({
-  name: 'custom',
-  detect(text) {
-    // 实现自定义敏感信息识别规则
-    return [];
-  },
-});
-
-// 2. 脱敏
-const result = await engine.desensitize('原始文本', 'case-001');
-console.log('脱敏后:', result.text);
-console.log('映射表:', result.mappings);
-
-// 3. 还原
-const restored = await engine.restore(result.text, 'case-001');
-console.log('还原后:', restored);
-```
-
----
-
-## 场景拓展
-
-本系统虽以浏览器端拦截器为起点，但其核心思想——**在数据产生源头即时脱敏，只传输不可逆推的占位符**——可以延伸到更广阔的安全架构中。
-
-### 与 DLP 系统的结合
-
-DLP（数据防泄漏）系统部署在网络的出口边界，扫描所有出站流量，发现敏感数据就拦截或告警。但 DLP 有一个天然的局限：**它看到的是明文，它必须在数据到达出口边界时才能识别和拦截**——这意味着 DLP 的生效范围仅限于出口这个单点，对于已经获准出站的数据，它无法再做进一步的保护。
-
-如果把本系统的脱敏引擎部署到 DLP 的**下游**呢？
-
-流量经过 DLP 的策略检查后，在真正离开内网之前，再经过一层脱敏处理：
-
-```
-内网 ──→ DLP 策略检查 ──→ 脱敏引擎 ──→ 外网
-  │                       │
-  │  判定是否可出站       │ 将明文替换为占位符
-  │  判断敏感等级         │ 即使出站也不含敏感信息
-```
-
-这意味着什么？——DLP 依然负责它的本职：做策略判定、分级分类、行为审计。但即使 DLP 判定某份文件"可以出站"，或者某条数据绕过了 DLP 的规则，**脱敏引擎作为最后一道防线，确保离开内网的数据中没有任何明文敏感信息**。
-
-> 这就引出一个问题：如果数据在离开内网时已经被自动脱敏，那"数据泄漏"的定义是不是需要重新审视？攻击者截获的是一堆随机字符串，这算不算泄漏？
-
-### 部署到网关（正向代理）
-
-如果把脱敏能力提升到网关层，会发生什么？
-
-假设你运营一个 SaaS 平台，所有客户的流量都经过统一网关。网关持有用户派生的会话密钥（基于用户密码 PBKDF2 派生，仅存于网关内存），那么：
-
-- **入站方向**：浏览器发出脱敏后的请求（占位符），网关**不需要解密**，直接转发到后端服务。后端永远只看到占位符。
-- **出站方向**：后端返回的数据中包含占位符，网关**必须还原**才能返回给浏览器——但网关有密钥，可以实时解密映射表，完成占位符 → 原文的还原。
-
-这意味着什么？——**后端服务甚至可以不知道自己正在处理敏感数据**。它看到的是 `a8f3d9e2` 这个名字、`b7c2e1f4` 这个电话，它不需要理解这些是什么，只需要完成业务逻辑。
-
-> 如果业务系统本身就不接触敏感数据，那数据泄漏事件的定义是不是需要被重写？服务器被拖库，攻击者看到的是一堆无意义的随机字符串——这算不算"零数据泄漏"？
-
-### 部署到 API 网关（反向代理）
-
-API 网关是更常见的部署锚点。与正向代理不同，API 网关直接面对的是**第三方或异构系统**的请求。
-
-假设一个场景：你的法律服务平台需要与法院的电子卷宗系统对接。法院系统要求传输当事人的全量信息，但你的安全合规要求**最小化数据暴露**。
-
-在 API 网关上部署本系统的脱敏引擎：
-
-1. **出站（你的服务 → 法院系统）**：API 网关将内部占位符还原为原文，再转发给法院。你的核心业务数据库里存的依然是占位符。
-2. **入站（法院系统 → 你的服务）**：法院返回的响应中包含敏感信息，API 网关将其脱敏后存入数据库。你的开发人员维护的数据库备份中只有随机字符串。
-
-> 这引出一个更深层的思考：当 API 网关成为"数据翻译层"——对内是占位符，对外是明文——那数据库的加密粒度是否就不再重要了？因为你数据库里本来就没有"敏感数据"可泄漏。
-
-### 更广阔的想象
-
-- **微服务间通信**：服务间 RPC 调用是否也可以携带脱敏后的数据？只有需要原文的服务才在网关层还原。
-- **日志与审计**：系统日志中记录的是 `a8f3d9e2` 而不是"张三"，日志泄漏事件自动降级为"随机字符串泄漏"。
-- **开发/测试环境**：从生产环境导出的数据天然就是脱敏的——因为生产环境存的本来就是占位符。不再需要额外开发"数据脱敏工具"。
-- **AI 训练数据**：脱敏后的数据保留元数据（实体类型、角色、关系），AI 模型可以理解"原告"与"被告"之间的关系，但从不接触真实姓名。
-
-> 如果"脱敏"不再是上线前的一个额外步骤，而是系统架构中默认的内置能力——那数据安全是不是就从"合规成本"变成了"架构红利"？
-
----
-
-## 与传统方案的区别
-
-理解本方案的最佳方式，是把它放在数据保护光谱上与其他方案对比。
-
-### 假名化（Pseudonymization）
-
-| 维度 | 假名化 | 本方案 |
-|------|--------|--------|
-| 映射方式 | 确定性替换（如 `张三 → PER_001`） | 纯随机占位符（`张三 → a8f3d9e2`） |
-| 跨数据源关联 | 同一原文在不同系统中映射一致，可被关联 | 跨案件隔离，同一原文在不同案件不同映射 |
-| 可逆性 | 有映射表即可还原 | 有映射表 + 会话密钥才能还原 |
-| 密钥管理 | 通常密钥与服务端数据共存 | 密钥仅存于客户端内存，登出即销毁 |
-
-**核心区别**：假名化假设"只要映射表不泄漏就安全"，但映射表与数据往往在同一权限域内。本方案将密钥与数据**物理分离**到不同信任域——服务器有数据但无密钥，客户端有密钥但无数据。
-
-### 匿名化（Anonymization）
-
-| 维度 | 匿名化 | 本方案 |
-|------|--------|--------|
-| 可逆性 | 不可逆，数据永久丢失 | 可逆，持有密钥即可还原 |
-| 数据效用 | 大幅降低，统计分析可能失真 | 保留元数据，AI 分析可正常进行 |
-| 合规回溯 | 无法应监管要求提供原文 | 可配合司法程序还原特定数据 |
-| 适用场景 | 数据发布、公开研究 | 日常业务处理、AI 辅助分析 |
-
-**核心区别**：匿名化是"一次性的"——数据一旦匿名就无法回头。本方案是"带着钥匙的脱敏"——日常以脱敏态运行，必要时（如应诉、审计）可在客户端还原。**匿名化解决的是"发布风险"，本方案解决的是"运行风险"。**
-
-### 端到端加密（E2EE）
-
-| 维度 | 端到端加密 | 本方案 |
-|------|-----------|--------|
-| 保护范围 | 传输过程中的数据 | 传输过程 + 静态存储 + 处理过程 |
-| 服务端处理 | 服务端无法处理加密数据（需解密） | 服务端可直接处理占位符（无需解密） |
-| 功能完整性 | 搜索、排序、AI 分析受限 | 全部功能可正常执行（基于元数据） |
-| 密钥管理 | 通信双方各自持有 | 单一用户跨设备同步 |
-
-**核心区别**：E2EE 确保"传输过程中没人能看到"，但数据到达服务器后必须解密才能处理——解密后的数据在服务器内存中就是明文。本方案更进一步：**服务器端处理的数据从始至终都是占位符，不在任何时间点暴露明文。** E2EE 保护的是"通道"，本方案保护的是"内容本身"。
-
-### 方案定位光谱
-
-```
-完全明文 ───────────────────────────────────── 数据完全销毁
-    │           │              │                   │
-    │        假名化         端到端加密           匿名化
-    │       (映射表)      (通道加密)          (不可逆)
-    │
-    │  ── 本方案 ──
-    │  客户端脱敏 + 加密映射 + 元数据保留
-    │  可逆 · 可处理 · 可审计 · 零信任
-```
-
-**本方案填补了一个长期存在的空白**：在"可逆但脆弱的假名化"和"安全但不可用的匿名化/E2EE"之间，提供了一个**既安全又可用的中间地带**。它不是要取代这些方案，而是在它们未曾覆盖的场景中——**数据在服务器端被处理时**——提供了新的选择。
-
----
-
-## 容器化部署（Demo 站点）
-
-本脱敏系统的核心是**无服务端、无状态、无数据库**的纯客户端库，脱敏/还原全部在浏览器本地完成。因此容器化的目标是一个**静态 Demo 站点**：构建产物 + Nginx 托管即可，无需任何后端进程。
-
-仓库已内置多阶段 `Dockerfile`、`nginx.conf`、`.dockerignore` 与 `docker-compose.yml`。
-
-### 1. 目录结构
-
-```
-.
-├── Dockerfile        # 多阶段：Node 构建 → Nginx 托管 dist/
-├── nginx.conf        # 静态托管、gzip、安全头、缓存策略
-├── .dockerignore     # 排除 node_modules / dist / .git 等
-├── docker-compose.yml# 一键启动，映射宿主机 8080 端口
-├── demo/index.html   # 交互式 Demo 页（纯用户自定义词，无内置识别算法）
-└── dist/             # 构建产物（index.html + index.js，Nginx 的根目录）
-```
-
-### 2. 本地构建产物（可选，非容器场景）
+骨架库零运行时依赖，直接安装类型即可运行示例：
 
 ```bash
 pnpm install
-pnpm build:demo
-# 产物输出到 dist/：index.html + index.js
+pnpm tsx examples/demo.ts   # 运行设备上限 + 电子签演示
 ```
 
-### 3. 本地验证（无需 Docker）
+示例输出：严格限制 3 台设备（第 4 台被拒）、同设备幂等复用、正文/签名哈希存证均为原文可核验。
 
-在没有 Docker 的环境（如云端沙箱）中，也可直接验证产物是否能作为静态站点服务：
+## 许可
 
-```bash
-pnpm install && pnpm build:demo
-cd dist && python3 -m http.server 8080
-# 浏览器打开 http://localhost:8080
-```
-
-验证要点：
-
-- `dist/index.html` 与 `dist/index.js` 均返回 `200`；
-- 页面通过 `<script src="/index.js">` 正确加载全局 `Desens`；
-- 输入敏感词点击「脱敏」后，交由 `engine.restore()` 还原，结果与原文完全一致。
-
-### 4. Docker 构建（手工）
-
-```bash
-docker build -t qinglvsenlin-desens-demo .
-docker run --rm -p 8080:80 qinglvsenlin-desens-demo
-# 浏览器打开 http://localhost:8080
-```
-
-### 5. Docker Compose（推荐）
-
-```bash
-docker compose up --build -d
-# 访问 http://localhost:8080
-# 查看健康状态
-docker compose ps       # 应为 healthy
-# 查看日志
-docker compose logs -f
-# 重新构建并启动（演示代码更新后）
-docker compose up --build -d
-# 停止
-docker compose down
-```
-
-### 6. 说明
-
-- **多阶段构建**：`node:22-alpine` 阶段 `corepack enable` + `pnpm install --frozen-lockfile`（锁定依赖，由 `packageManager` 固定 pnpm 版本）+ `pnpm build` 产出 `dist/`；`nginx:1.27-alpine` 阶段仅拷贝 `dist/` 与 `nginx.conf`，镜像小、不含源码与依赖。
-- **纯静态**：整个运行时只有 `index.html` 与 `index.js`，不占后端端口、不连数据库、不留任何敏感数据上送服务器，完全契合零信任定位。
-- **Demo 的识别为演示用**：Demo 页使用**用户自定义敏感词精确匹配**（`wordDetector`），仅用于演示「脱敏→还原」流程，**不内置任何敏感信息识别算法**。如需真实识别能力，请在宿主应用中注入自带 `Detector` 规则。
-- **健康检查**：容器内通过 `wget` 对 `/` 探活，`docker compose ps` 显示 `healthy` 表示就绪。
-- **已验证**：多阶段构建等价复现（全新目录 `--frozen-lockfile` 安装 + `build` 产出 `dist/`）、静态服务探活、最终 `dist/index.js` 脱敏→还原往返均通过。
-- **构建需联网（首次）**：`corepack` 会按 `packageManager` 拉取 `pnpm@9.15.9`，`pnpm install` 需拉取依赖；esbuild 在 `node:22-alpine`(musl) 下通过其 optional 平台包 `@esbuild/linux-musl-x64` 自动安装对应二进制，无需额外处理。首次构建完成后依赖进入 Docker 层缓存。
-
-### 7. 常见问题
-
-- **端口冲突**：修改 `docker-compose.yml` 中 `ports` 左侧的宿主机端口（如 `8080:80` → `8888:80`），容器内始终为 `80`。
-- **更新演示后浏览器仍是旧版**：`html` 已设置 `no-cache`，静态资源缓存 1h；硬刷新（`Ctrl/Cmd+Shift+R`）即可拿到最新。
-- **安全响应头**：已内置 `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy`。若前置反代/ WAF，请保留这些响应头不被覆盖（nginx 的 `add_header` 在子块内声明会覆盖 server 级，勿在静态资源 location 内重复声明）。
-- **对外公网部署**：建议在 Nginx 或上游反代终止 HTTPS；容器内仅监听 HTTP `80`。
-
----
-
-## 许可证
-
-[Apache License 2.0](LICENSE)
-
----
-
-## 关于
-
-本骨架库沉淀了一套「客户端零信任数据脱敏 + 版权激活校验 + 电子签哈希存证」的组合安全方案，供独立项目按需复用其中一块或组合使用。
-
-本项目脱敏部分的技术方案已于 2026 年 7 月 20 日在创客IP 平台进行公示。
-
----
-
-## 关于作者
-
-本项目由独立开发者维护，源于处理数据安全与软件版权合规问题的实际需求。欢迎通过 Issue 或讨论区交流。
+[Apache License 2.0](./LICENSE)
