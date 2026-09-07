@@ -1,0 +1,45 @@
+{
+  "name": "legal-compliance-skeleton",
+  "version": "1.0.0",
+  "description": "软件版权合规安全骨架：客户端零信任数据脱敏 + 设备激活上限校验 + 电子签哈希存证",
+  "keywords": [
+    "copyright",
+    "license-compliance",
+    "desensitization",
+    "data-privacy",
+    "zero-trust",
+    "aes-256-gcm",
+    "pbkdf2",
+    "client-side-encryption",
+    "esign",
+    "device-activation"
+  ],
+  "homepage": "https://github.com/YOUR_USERNAME/legal-compliance-skeleton",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/legal-compliance-skeleton"
+  },
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@9.15.9",
+  "author": {
+    "name": "legal-compliance-skeleton contributors"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:demo": "mkdir -p dist && esbuild src/index.ts --bundle --format=iife --global-name=Desens --outfile=dist/index.js --log-level=warning && cp demo/index.html dist/index.html",
+    "build": "pnpm run build:demo"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}
