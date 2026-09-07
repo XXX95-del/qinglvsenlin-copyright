@@ -1,28 +1,27 @@
 {
-  "name": "legal-compliance-skeleton",
+  "name": "@qinglvsenlin/copyright-compliance",
   "version": "1.0.0",
-  "description": "软件版权合规安全骨架：客户端零信任数据脱敏 + 设备激活上限校验 + 电子签哈希存证",
+  "description": "软件版权合规安全骨架：设备激活上限校验 + 电子签SHA-256哈希存证（零信任、纯TS）",
   "keywords": [
     "copyright",
     "license-compliance",
-    "desensitization",
-    "data-privacy",
     "zero-trust",
-    "aes-256-gcm",
-    "pbkdf2",
-    "client-side-encryption",
     "esign",
-    "device-activation"
+    "device-activation",
+    "sha256",
+    "postgres",
+    "row-lock",
+    "anti-tamper"
   ],
-  "homepage": "https://github.com/YOUR_USERNAME/legal-compliance-skeleton",
+  "homepage": "https://github.com/YOUR_USERNAME/qinglvsenlin-copyright",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/legal-compliance-skeleton"
+    "url": "https://github.com/YOUR_USERNAME/qinglvsenlin-copyright"
   },
   "license": "Apache-2.0",
   "packageManager": "pnpm@9.15.9",
   "author": {
-    "name": "legal-compliance-skeleton contributors"
+    "name": "qinglvsenlin contributors"
   },
   "type": "module",
   "main": "./src/index.ts",

@@ -1,5 +1,5 @@
 /**
- * legal-compliance-skeleton
+ * qinglvsenlin-copyright
  *
  * 版权校验 + 电子签 的通用骨架（纯 TypeScript，零第三方运行时依赖）。
  *

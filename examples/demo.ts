@@ -18,8 +18,8 @@ async function main() {
   const activate = async (device: string) => {
     const ok = await guard.activate(
       async () => {},                       // 行锁串行闸门（生产见 devices.ts 注释）
-      async () => active.size,              // 临界区内读当前活跃数
-      async () => active.set(device, randomToken('ACT', 6)), // 临界区内写
+      async () => active.size,                // 临界区内读当前活跃数
+      async () => { active.set(device, randomToken('ACT', 6)); }, // 临界区内写
     );
     if (ok) {
       const t = active.get(device)!;
